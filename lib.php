@@ -1087,7 +1087,7 @@ function certificate_get_mod_grade($course, $moduleid, $userid) {
             $item->$key = $value;
         }
         $modinfo = new stdClass;
-        $modinfo->name = utf8_decode($DB->get_field($module->name, 'name', array('id' => $cm->instance)));
+        $modinfo->name = $DB->get_field($module->name, 'name', array('id' => $cm->instance));
         $grade = $item->grades[$userid]->grade;
         $item->gradetype = GRADE_TYPE_VALUE;
         $item->courseid = $course->id;
