@@ -307,4 +307,7 @@ function certificate_get_view_actions() {
 function certificate_get_post_actions() {
     return array('received');
 }
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/master
