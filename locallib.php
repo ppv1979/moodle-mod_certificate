@@ -16,14 +16,17 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Certificate module core interaction API
+ * Certificate module internal API,
+ * this is in separate file to reduce memory use on non-certificate pages.
  *
- * @package    mod
- * @subpackage certificate
+ * @package    mod_certificate
  * @copyright  Mark Nelson <markn@moodle.com>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
+defined('MOODLE_INTERNAL') || die();
+
+require_once($CFG->dirroot.'/mod/certificate/lib.php');
 require_once($CFG->dirroot.'/course/lib.php');
 require_once($CFG->dirroot.'/grade/lib.php');
 require_once($CFG->dirroot.'/grade/querylib.php');
@@ -42,229 +45,6 @@ define('CERT_PER_PAGE', 30);
 
 define('CERT_MAX_PER_PAGE', 200);
 
-/**
- * Add certificate instance.
- *
- * @param stdClass $certificate
- * @return int new certificate instance id
- */
-function certificate_add_instance($certificate) {
-    global $DB;
-
-    // Create the certificate.
-    $certificate->timecreated = time();
-    $certificate->timemodified = $certificate->timecreated;
-
-    return $DB->insert_record('certificate', $certificate);
-}
-
-/**
- * Update certificate instance.
- *
- * @param stdClass $certificate
- * @return bool true
- */
-function certificate_update_instance($certificate) {
-    global $DB;
-
-    // Update the certificate.
-    $certificate->timemodified = time();
-    $certificate->id = $certificate->instance;
-
-    return $DB->update_record('certificate', $certificate);
-}
-
-/**
- * Given an ID of an instance of this module,
- * this function will permanently delete the instance
- * and any data that depends on it.
- *
- * @param int $id
- * @return bool true if successful
- */
-function certificate_delete_instance($id) {
-    global $DB;
-
-    // Ensure the certificate exists
-    if (!$certificate = $DB->get_record('certificate', array('id' => $id))) {
-        return false;
-    }
-
-    // Prepare file record object
-    if (!$cm = get_coursemodule_from_instance('certificate', $id)) {
-        return false;
-    }
-
-    $result = true;
-    $DB->delete_records('certificate_issues', array('certificateid' => $id));
-    if (!$DB->delete_records('certificate', array('id' => $id))) {
-        $result = false;
-    }
-
-    // Delete any files associated with the certificate
-    $context = context_module::instance($cm->id);
-    $fs = get_file_storage();
-    $fs->delete_area_files($context->id);
-
-    return $result;
-}
-
-/**
- * This function is used by the reset_course_userdata function in moodlelib.
- * This function will remove all posts from the specified certificate
- * and clean up any related data.
- *
- * Written by Jean-Michel Vedrine
- *
- * @param $data the data submitted from the reset course.
- * @return array status array
- */
-function certificate_reset_userdata($data) {
-    global $DB;
-
-    $componentstr = get_string('modulenameplural', 'certificate');
-    $status = array();
-
-    if (!empty($data->reset_certificate)) {
-        $sql = "SELECT cert.id
-                  FROM {certificate} cert
-                 WHERE cert.course = :courseid";
-        $DB->delete_records_select('certificate_issues', "certificateid IN ($sql)", array('courseid' => $data->courseid));
-        $status[] = array('component' => $componentstr, 'item' => get_string('certificateremoved', 'certificate'), 'error' => false);
-    }
-
-    // Updating dates - shift may be negative too
-    if ($data->timeshift) {
-        shift_course_mod_dates('certificate', array('timeopen', 'timeclose'), $data->timeshift, $data->courseid);
-        $status[] = array('component' => $componentstr, 'item' => get_string('datechanged'), 'error' => false);
-    }
-
-    return $status;
-}
-
-/**
- * Implementation of the function for printing the form elements that control
- * whether the course reset functionality affects the certificate.
- *
- * Written by Jean-Michel Vedrine
- *
- * @param $mform form passed by reference
- */
-function certificate_reset_course_form_definition(&$mform) {
-    $mform->addElement('header', 'certificateheader', get_string('modulenameplural', 'certificate'));
-    $mform->addElement('advcheckbox', 'reset_certificate', get_string('deletissuedcertificates', 'certificate'));
-}
-
-/**
- * Course reset form defaults.
- *
- * Written by Jean-Michel Vedrine
- *
- * @param stdClass $course
- * @return array
- */
-function certificate_reset_course_form_defaults($course) {
-    return array('reset_certificate' => 1);
-}
-
-/**
- * Returns information about received certificate.
- * Used for user activity reports.
- *
- * @param stdClass $course
- * @param stdClass $user
- * @param stdClass $mod
- * @param stdClass $certificate
- * @return stdClass the user outline object
- */
-function certificate_user_outline($course, $user, $mod, $certificate) {
-    global $DB;
-
-    $result = new stdClass;
-    if ($issue = $DB->get_record('certificate_issues', array('certificateid' => $certificate->id, 'userid' => $user->id))) {
-        $result->info = get_string('issued', 'certificate');
-        $result->time = $issue->timecreated;
-    } else {
-        $result->info = get_string('notissued', 'certificate');
-    }
-
-    return $result;
-}
-
-/**
- * Returns information about received certificate.
- * Used for user activity reports.
- *
- * @param stdClass $course
- * @param stdClass $user
- * @param stdClass $mod
- * @param stdClass $certificate
- * @return string the user complete information
- */
-function certificate_user_complete($course, $user, $mod, $certificate) {
-   global $DB, $OUTPUT;
-
-   if ($issue = $DB->get_record('certificate_issues', array('certificateid' => $certificate->id, 'userid' => $user->id))) {
-        echo $OUTPUT->box_start();
-        echo get_string('issued', 'certificate') . ": ";
-        echo userdate($issue->timecreated);
-        $cm = get_coursemodule_from_instance('certificate', $certificate->id, $course->id);
-        certificate_print_user_files($certificate, $user->id, context_module::instance($cm->id)->id);
-        echo '<br />';
-        echo $OUTPUT->box_end();
-    } else {
-        print_string('notissuedyet', 'certificate');
-    }
-}
-
-/**
- * Must return an array of user records (all data) who are participants
- * for a given instance of certificate.
- *
- * @param int $certificateid
- * @return stdClass list of participants
- */
-function certificate_get_participants($certificateid) {
-    global $DB;
-
-    $sql = "SELECT DISTINCT u.id, u.id
-              FROM {user} u, {certificate_issues} a
-             WHERE a.certificateid = :certificateid
-               AND u.id = a.userid";
-    return  $DB->get_records_sql($sql, array('certificateid' => $certificateid));
-}
-
-/**
- * @uses FEATURE_GROUPS
- * @uses FEATURE_GROUPINGS
- * @uses FEATURE_GROUPMEMBERSONLY
- * @uses FEATURE_MOD_INTRO
- * @uses FEATURE_COMPLETION_TRACKS_VIEWS
- * @uses FEATURE_GRADE_HAS_GRADE
- * @uses FEATURE_GRADE_OUTCOMES
- * @param string $feature FEATURE_xx constant for requested feature
- * @return mixed True if module supports feature, null if doesn't know
- */
-function certificate_supports($feature) {
-    switch ($feature) {
-        case FEATURE_GROUPS:                  return true;
-        case FEATURE_GROUPINGS:               return true;
-        case FEATURE_GROUPMEMBERSONLY:        return true;
-        case FEATURE_MOD_INTRO:               return true;
-        case FEATURE_COMPLETION_TRACKS_VIEWS: return true;
-        case FEATURE_BACKUP_MOODLE2:          return true;
-
-        default: return null;
-    }
-}
-
-/**
- * Function to be run periodically according to the moodle cron
- * TODO:This needs to be done
- */
-function certificate_cron () {
-    return true;
-}
 
 /**
  * Returns a list of teachers by group
@@ -372,7 +152,7 @@ function certificate_email_others($course, $certificate, $certrecord, $cm) {
     global $USER, $CFG;
 
     if ($certificate->emailothers) {
-       $others = explode(',', $certificate->emailothers);
+        $others = explode(',', $certificate->emailothers);
         if ($others) {
             $strawarded = get_string('awarded', 'certificate');
             foreach ($others as $other) {
@@ -432,9 +212,11 @@ function certificate_email_teachers_html($info) {
  * @param stdClass $certificate
  * @param stdClass $certrecord
  * @param stdClass $context
+ * @param string $filecontents the PDF file contents
+ * @param string $filename
  * @return bool Returns true if mail was sent OK and false if there was an error.
  */
-function certificate_email_student($course, $certificate, $certrecord, $context) {
+function certificate_email_student($course, $certificate, $certrecord, $context, $filecontents, $filename) {
     global $USER;
 
     // Get teachers
@@ -446,7 +228,7 @@ function certificate_email_student($course, $certificate, $certrecord, $context)
 
     // If we haven't found a teacher yet, look for a non-editing teacher in this course.
     if (empty($teacher) && $users = get_users_by_capability($context, 'moodle/course:update', 'u.*', 'u.id ASC',
-        '', '', '', '', false, true)) {
+            '', '', '', '', false, true)) {
         $users = sort_by_roleassignment_authority($users, $context);
         $teacher = array_shift($users);
     }
@@ -467,84 +249,22 @@ function certificate_email_student($course, $certificate, $certrecord, $context)
     // Make the HTML version more XHTML happy  (&amp;)
     $messagehtml = text_to_html(get_string('emailstudenttext', 'certificate', $info));
 
-    // Remove full-stop at the end if it exists, to avoid "..pdf" being created and being filtered by clean_filename
-    $certname = rtrim($certificate->name, '.');
-    $filename = clean_filename("$certname.pdf");
-
-    // Get hashed pathname
-    $fs = get_file_storage();
-
-    $component = 'mod_certificate';
-    $filearea = 'issue';
-    $filepath = '/';
-    $files = $fs->get_area_files($context->id, $component, $filearea, $certrecord->id);
-    foreach ($files as $f) {
-        $filepathname = $f->get_contenthash();
-    }
-    $attachment = 'filedir/'.certificate_path_from_hash($filepathname).'/'.$filepathname;
-    $attachname = $filename;
-
-    return email_to_user($USER, $from, $subject, $message, $messagehtml, $attachment, $attachname);
-}
-
-/**
- * Retrieve certificate path from hash
- *
- * @param array $contenthash
- * @return string the path
- */
-function certificate_path_from_hash($contenthash) {
-    $l1 = $contenthash[0].$contenthash[1];
-    $l2 = $contenthash[2].$contenthash[3];
-    return "$l1/$l2";
-}
-
-/**
- * Serves certificate issues and other files.
- *
- * @param stdClass $course
- * @param stdClass $cm
- * @param stdClass $context
- * @param string $filearea
- * @param array $args
- * @param bool $forcedownload
- * @return bool|nothing false if file not found, does not return anything if found - just send the file
- */
-function certificate_pluginfile($course, $cm, $context, $filearea, $args, $forcedownload) {
-    global $CFG, $DB, $USER;
-
-    if ($context->contextlevel != CONTEXT_MODULE) {
+    $tempdir = make_temp_directory('certificate/attachment');
+    if (!$tempdir) {
         return false;
     }
 
-    if (!$certificate = $DB->get_record('certificate', array('id' => $cm->instance))) {
-        return false;
-    }
+    $tempfile = $tempdir.'/'.md5(sesskey().microtime().$USER->id.'.pdf');
+    $fp = fopen($tempfile, 'w+');
+    fputs($fp, $filecontents);
+    fclose($fp);
 
-    require_login($course, false, $cm);
+    $prevabort = ignore_user_abort(true);
+    $result = email_to_user($USER, $from, $subject, $message, $messagehtml, $tempfile, $filename);
+    @unlink($tempfile);
+    ignore_user_abort($prevabort);
 
-    require_once($CFG->libdir.'/filelib.php');
-
-    if ($filearea === 'issue') {
-        $certrecord = (int)array_shift($args);
-
-        if (!$certrecord = $DB->get_record('certificate_issues', array('id' => $certrecord))) {
-            return false;
-        }
-
-        if ($USER->id != $certrecord->userid and !has_capability('mod/certificate:manage', $context)) {
-            return false;
-        }
-
-        $relativepath = implode('/', $args);
-        $fullpath = "/{$context->id}/mod_certificate/issue/$certrecord->id/$relativepath";
-
-        $fs = get_file_storage();
-        if (!$file = $fs->get_file_by_hash(sha1($fullpath)) or $file->is_directory()) {
-            return false;
-        }
-        send_stored_file($file, 0, 0, true); // download MUST be forced - security!
-    }
+    return $result;
 }
 
 /**
@@ -583,12 +303,9 @@ function certificate_save_pdf($pdf, $certrecordid, $filename, $contextid) {
         'mimetype'  => 'application/pdf',    // any filename
         'userid'    => $USER->id);
 
-    // If the file exists, delete it and recreate it. This is to ensure that the
-    // latest certificate is saved on the server. For example, the student's grade
-    // may have been updated. This is a quick dirty hack.
-    if ($fs->file_exists($contextid, $component, $filearea, $certrecordid, $filepath, $filename)) {
-        $fs->delete_area_files($contextid, $component, $filearea, $certrecordid);
-    }
+    // We do not know the previous file name, better delete everything here,
+    // luckily there is supposed to be always only one certificate here.
+    $fs->delete_area_files($contextid, $component, $filearea, $certrecordid);
 
     $fs->create_file_from_string($fileinfo, $pdf);
 
@@ -619,7 +336,7 @@ function certificate_print_user_files($certificate, $userid, $contextid) {
         $link = file_encode_url($CFG->wwwroot.'/pluginfile.php', '/'.$contextid.'/mod_certificate/issue/'.$certrecord->id.'/'.$filename);
 
         $output = '<img src="'.$OUTPUT->pix_url(file_mimetype_icon($file->get_mimetype())).'" height="16" width="16" alt="'.$file->get_mimetype().'" />&nbsp;'.
-                  '<a href="'.$link.'" >'.s($filename).'</a>';
+            '<a href="'.$link.'" >'.s($filename).'</a>';
 
     }
     $output .= '<br />';
@@ -871,10 +588,10 @@ function certificate_get_mods() {
                 switch ($COURSE->format) {
                     case "topics":
                         $sectionlabel = $strtopic;
-                    break;
+                        break;
                     case "weeks":
                         $sectionlabel = $strweek;
-                    break;
+                        break;
                     default:
                         $sectionlabel = $strsection;
                 }
@@ -978,23 +695,6 @@ function certificate_get_outcomes() {
     return $outcomeoptions;
 }
 
-/**
- * Used for course participation report (in case certificate is added).
- *
- * @return array
- */
-function certificate_get_view_actions() {
-    return array('view', 'view all', 'view report');
-}
-
-/**
- * Used for course participation report (in case certificate is added).
- *
- * @return array
- */
-function certificate_get_post_actions() {
-    return array('received');
-}
 
 /**
  * Get certificate types indexed and sorted by name for mod_form.
@@ -1083,7 +783,8 @@ function certificate_get_mod_grade($course, $moduleid, $userid) {
             $item->$key = $value;
         }
         $modinfo = new stdClass;
-        $modinfo->name = $DB->get_field($module->name, 'name', array('id' => $cm->instance));
+        $modname = $DB->get_field($module->name, 'name', array('id' => $cm->instance));
+        $modinfo->name = format_string($modname, true, array('context' => context_module::instance($cm->id)));
         $grade = $item->grades[$userid]->grade;
         $item->gradetype = GRADE_TYPE_VALUE;
         $item->courseid = $course->id;
@@ -1352,7 +1053,7 @@ function certificate_draw_frame($pdf, $certificate) {
                 // create inner line border in selected color
                 $pdf->SetLineStyle(array('width' => 1.0, 'color' => $color));
                 $pdf->Rect(16, 16, 265, 178);
-            break;
+                break;
             case 'P':
                 // create outer line border in selected color
                 $pdf->SetLineStyle(array('width' => 1.5, 'color' => $color));
@@ -1363,7 +1064,7 @@ function certificate_draw_frame($pdf, $certificate) {
                 // create inner line border in selected color
                 $pdf->SetLineStyle(array('width' => 1.0, 'color' => $color));
                 $pdf->Rect(16, 16, 178, 265);
-            break;
+                break;
         }
     }
 }
@@ -1410,7 +1111,7 @@ function certificate_draw_frame_letter($pdf, $certificate) {
                 // create inner line border in selected color
                 $pdf->SetLineStyle(array('width' => 1.0, 'color' => $color));
                 $pdf->Rect(51, 46, 509, 699);
-            break;
+                break;
         }
     }
 }
@@ -1456,7 +1157,7 @@ function certificate_print_image($pdf, $certificate, $type, $x, $y, $w, $h) {
         switch ($certificate->$attr) {
             case '0' :
             case '' :
-            break;
+                break;
             default :
                 if (file_exists($path)) {
                     $pdf->Image($path, $x, $y, $w, $h);
@@ -1464,7 +1165,7 @@ function certificate_print_image($pdf, $certificate, $type, $x, $y, $w, $h) {
                 if (file_exists($uploadpath)) {
                     $pdf->Image($uploadpath, $x, $y, $w, $h);
                 }
-            break;
+                break;
         }
     }
 }
@@ -1512,4 +1213,37 @@ function certificate_scan_image_dir($path) {
         }
     }
     return $options;
+}
+
+/**
+ * Get normalised certificate file name without file extension.
+ *
+ * @param stdClass $certificate
+ * @param stdClass $cm
+ * @param stdClass $course
+ * @return string file name without extension
+ */
+function certificate_get_certificate_filename($certificate, $cm, $course) {
+    $coursecontext = context_course::instance($course->id);
+    $coursename = format_string($course->shortname, true, array('context' => $coursecontext));
+
+    $context = context_module::instance($cm->id);
+    $name = format_string($certificate->name, true, array('context' => $context));
+
+    $filename = $coursename . '_' . $name;
+    $filename = core_text::entities_to_utf8($filename);
+    $filename = strip_tags($filename);
+    $filename = rtrim($filename, '.');
+
+    // Ampersand is not a valid filename char, let's replace it with something else.
+    $filename = str_replace('&', '_', $filename);
+
+    $filename = clean_filename($filename);
+
+    if (empty($filename)) {
+        // This is weird, but we need some file name.
+        $filename = 'certificate';
+    }
+
+    return $filename;
 }
