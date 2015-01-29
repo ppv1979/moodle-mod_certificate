@@ -390,7 +390,7 @@ function certificate_get_issue($course, $user, $certificate, $cm) {
  * @return stdClass the users
  */
 function certificate_get_issues($certificateid, $sort="ci.timecreated ASC", $groupmode, $cm, $page = 0, $perpage = 0) {
-    global $CFG, $DB;
+    global $DB, $USER;
 
     // get all users that can manage this certificate to exclude them from the report.
     $context = context_module::instance($cm->id);
@@ -403,41 +403,42 @@ function certificate_get_issues($certificateid, $sort="ci.timecreated ASC", $gro
         $conditionsparams += $params;
     }
 
-    $restricttogroup = false;
-    if ($groupmode) {
+    if ($groupmode && $groupmode == SEPARATEGROUPS) {
+        $canaccessallgroups = has_capability('moodle/site:accessallgroups', $context);
         $currentgroup = groups_get_activity_group($cm);
+
+        // If we are viewing all participants and the user does not have access to all groups then return nothing.
+        if (!$currentgroup && !$canaccessallgroups) {
+            return array();
+        }
+
         if ($currentgroup) {
-            $restricttogroup = true;
+            if (!$canaccessallgroups) {
+                // Guest users do not belong to any groups.
+                if (isguestuser()) {
+                    return array();
+                }
+
+                // Check that the user belongs to the group we are viewing.
+                $usersgroups = groups_get_all_groups($cm->course, $USER->id, $cm->groupingid);
+                if ($usersgroups) {
+                    if (!isset($usersgroups[$currentgroup])) {
+                        return array();
+                    }
+                } else { // They belong to no group, so return an empty array.
+                    return array();
+                }
+            }
+
             $groupusers = array_keys(groups_get_members($currentgroup, 'u.*'));
             if (empty($groupusers)) {
                 return array();
             }
+
+            list($sql, $params) = $DB->get_in_or_equal($groupusers, SQL_PARAMS_NAMED, 'grp');
+            $conditionssql .= "AND u.id $sql ";
+            $conditionsparams += $params;
         }
-    }
-
-    $restricttogrouping = false;
-
-    // if groupmembersonly used, remove users who are not in any group
-    if (!empty($CFG->enablegroupings) and $cm->groupmembersonly) {
-        if ($groupingusers = groups_get_grouping_members($cm->groupingid, 'u.id', 'u.id')) {
-            $restricttogrouping = true;
-        } else {
-            return array();
-        }
-    }
-
-    if ($restricttogroup || $restricttogrouping) {
-        if ($restricttogroup) {
-            $allowedusers = $groupusers;
-        } else if ($restricttogroup && $restricttogrouping) {
-            $allowedusers = array_intersect($groupusers, $groupingusers);
-        } else  {
-            $allowedusers = $groupingusers;
-        }
-
-        list($sql, $params) = $DB->get_in_or_equal($allowedusers, SQL_PARAMS_NAMED, 'grp');
-        $conditionssql .= "AND u.id $sql \n";
-        $conditionsparams += $params;
     }
 
     $page = (int) $page;
@@ -447,7 +448,7 @@ function certificate_get_issues($certificateid, $sort="ci.timecreated ASC", $gro
     $allparams = $conditionsparams + array('certificateid' => $certificateid);
 
     // The picture fields also include the name fields for the user.
-    $picturefields = user_picture::fields('u');
+    $picturefields = user_picture::fields('u', get_extra_user_fields($context));
     $users = $DB->get_records_sql("SELECT $picturefields, u.idnumber, ci.code, ci.timecreated
                                      FROM {user} u
                                INNER JOIN {certificate_issues} ci
@@ -530,30 +531,60 @@ function certificate_print_attempts($course, $certificate, $attempts) {
  * @return int the total time spent in seconds
  */
 function certificate_get_course_time($courseid) {
-    global $CFG, $USER;
+    global $CFG, $DB, $USER;
 
-    set_time_limit(0);
+    $logmanager = get_log_manager();
+    $readers = $logmanager->get_readers();
+    $enabledreaders = get_config('tool_log', 'enabled_stores');
+    $enabledreaders = explode(',', $enabledreaders);
+
+    // Go through all the readers until we find one that we can use.
+    foreach ($enabledreaders as $enabledreader) {
+        $reader = $readers[$enabledreader];
+        if ($reader instanceof \logstore_legacy\log\store) {
+            $logtable = 'log';
+            $coursefield = 'course';
+            $timefield = 'time';
+            break;
+        } else if ($reader instanceof \core\log\sql_internal_reader) {
+            $logtable = $reader->get_internal_log_table_name();
+            $coursefield = 'courseid';
+            $timefield = 'timecreated';
+            break;
+        }
+    }
+
+    // If we didn't find a reader then return 0.
+    if (!isset($logtable)) {
+        return 0;
+    }
+
+    $sql = "SELECT id, $timefield
+              FROM {{$logtable}}
+             WHERE userid = :userid
+               AND $coursefield = :courseid
+          ORDER BY $timefield ASC";
+    $params = array('userid' => $USER->id, 'courseid' => $courseid);
 
     $totaltime = 0;
-    $sql = "l.course = :courseid AND l.userid = :userid";
-    if ($logs = get_logs($sql, array('courseid' => $courseid, 'userid' => $USER->id), 'l.time ASC', '', '', $totalcount)) {
+    if ($logs = $DB->get_recordset_sql($sql, $params)) {
         foreach ($logs as $log) {
             if (!isset($login)) {
                 // For the first time $login is not set so the first log is also the first login
-                $login = $log->time;
-                $lasthit = $log->time;
+                $login = $log->$timefield;
+                $lasthit = $log->$timefield;
                 $totaltime = 0;
             }
-            $delay = $log->time - $lasthit;
+            $delay = $log->$timefield - $lasthit;
             if ($delay > ($CFG->sessiontimeout * 60)) {
                 // The difference between the last log and the current log is more than
                 // the timeout Register session value so that we have found a session!
-                $login = $log->time;
+                $login = $log->$timefield;
             } else {
                 $totaltime += $delay;
             }
             // Now the actual log became the previous log for the next cycle
-            $lasthit = $log->time;
+            $lasthit = $log->$timefield;
         }
 
         return $totaltime;
